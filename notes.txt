@@ -1,0 +1,15 @@
+Notebooks
+* LGBMRegressor, RMSPE .29082 https://www.kaggle.com/konradb/we-need-to-go-deeper-and-validate
+* Linear regression .23855 https://www.kaggle.com/lucasmorin/realised-vol-weighted-regression-baseline
+* Random forrest https://www.kaggle.com/thanish/randomforest-starter-submission
+* LGMB .28510 https://www.kaggle.com/yus002/realized-volatility-prediction-lgbm-train
+* features https://www.kaggle.com/munumbutt/feature-engineering-tuned-xgboost-lgbm
+* 132 features
+To research
+*  Marcos Lopez de Prado Advances in Financial Machine Learning. https://www.kaggle.com/c/optiver-realized-volatility-prediction/discussion/249782#1370162
+* Winning solutions: https://www.kaggle.com/c/optiver-realized-volatility-prediction/discussion/249523
+        https://www.kaggle.com/c/optiver-realized-volatility-prediction/discussion/249898
+* https://thehedgefundjournal.com/volatility-and-uncertainty/
+* Realized Volatility forecasting with NN https://mpra.ub.uni-muenchen.de/95443/1/MPRA_paper_95443.pdf
+* microprice: A High Frequency Estimator of Future Prices https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2970694
+* ARCH GARCH https://www.kaggle.com/c/optiver-realized-volatility-prediction/discussion/250998
