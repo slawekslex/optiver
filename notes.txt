@@ -13,3 +13,4 @@ To research
 * Realized Volatility forecasting with NN https://mpra.ub.uni-muenchen.de/95443/1/MPRA_paper_95443.pdf
 * microprice: A High Frequency Estimator of Future Prices https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2970694
 * ARCH GARCH https://www.kaggle.com/c/optiver-realized-volatility-prediction/discussion/250998
+* https://facebook.github.io/prophet
