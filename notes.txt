@@ -1,8 +1,11 @@
+Train arcface on test data for stock and time embs
+
+
 Notebooks
 * LGBMRegressor, RMSPE .29082 https://www.kaggle.com/konradb/we-need-to-go-deeper-and-validate
 * Linear regression .23855 https://www.kaggle.com/lucasmorin/realised-vol-weighted-regression-baseline
 * Random forrest https://www.kaggle.com/thanish/randomforest-starter-submission
-* LGMB .28510 https://www.kaggle.com/yus002/realized-volatility-prediction-lgbm-train
+* LGMB .22 https://www.kaggle.com/tommy1028/lightgbm-starter-with-feature-engineering-idea
 * features https://www.kaggle.com/munumbutt/feature-engineering-tuned-xgboost-lgbm
 * 132 features
 To research
