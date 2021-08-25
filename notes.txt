@@ -1,4 +1,5 @@
-Train arcface on test data for stock and time embs
+Add min/max aggregation to features
+Add 10 minute buckets to features
 
 
 Notebooks
