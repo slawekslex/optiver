@@ -25,6 +25,14 @@ def log_return_price(df): return df.groupby('time_id')['price'].apply(log_return
 def realized_volatility(series):
     return np.sqrt(np.sum(series**2))
 
+def to32bit(df):
+    for c in df.columns:
+        if df[c].dtype == np.float64: 
+            df[c] = df[c].astype(np.float32)
+        elif df[c].dtype == np.int64:
+            df[c] = df[c].astype(np.int32)
+    return df
+
 def process_data(df, feature_dict, windows):
     ret=[]
     string_feature_dict = dict(feature_dict)
@@ -35,12 +43,17 @@ def process_data(df, feature_dict, windows):
     for w in windows:
         data = df[(df.seconds_in_bucket >= w[0]) & (df.seconds_in_bucket < w[1])]
         w_suff = f'_{w[0]}_{w[1]}'
-        time_ids = data.time_id.unique()
         df_feature= data.groupby('time_id').agg(string_feature_dict)
         df_feature.columns = ['_'.join(x) + w_suff for x in df_feature.columns]
         ret.append(df_feature)
     return pd.concat(ret, axis=1)
-                
+   
+def fix_offsets(data_df):
+    offsets = data_df.groupby(['time_id']).agg({'seconds_in_bucket':'min'})
+    offsets.columns = ['offset']
+    data_df = data_df.join(offsets, on='time_id')
+    data_df.seconds_in_bucket = data_df.seconds_in_bucket - data_df.offset
+    return data_df
 
 def ffill(data_df):
     data_df=data_df.set_index(['time_id', 'seconds_in_bucket'])
@@ -60,10 +73,11 @@ class OptiverFeatureGenerator():
     def process_one_stock(self, stock_id, typ='train'):
         book_df = pd.read_parquet(self.data_dir / f'book_{typ}.parquet/stock_id={stock_id}')
         trade_df = pd.read_parquet(self.data_dir / f'trade_{typ}.parquet/stock_id={stock_id}')
+        book_df = fix_offsets(book_df)
         book_df = ffill(book_df)
         book_feat = process_data(book_df, self.book_feature_dict, self.time_windows)
         trade_feat = process_data(trade_df, self.trade_feature_dict, self.time_windows)
-        ret = pd.concat([trade_feat,book_feat], axis=1)
+        ret = pd.concat([to32bit(trade_feat), to32bit(book_feat)], axis=1)
         ret = ret.reset_index()
         ret['row_id'] = ret['time_id'].apply(lambda x:f'{stock_id}-{x}')
         ret = ret.drop('time_id', axis=1)
