@@ -64,7 +64,8 @@ def get_dls(train_df, bs, trn_idx, val_idx):
 class TimeEncoding(nn.Module):
     def __init__(self, inp_size, bottleneck, p, multiplier):
         super().__init__()
-        self.multiplier  = multiplier#nn.Parameter(torch.tensor(multiplier)) 
+        self.multiplier  = nn.Parameter(torch.tensor(multiplier)) 
+        # self.multiplier = multiplier
         self.initial_layers = LinBnDrop(inp_size, bottleneck, act=nn.ReLU(True), p=p, bn=False)
         
         self.concat_layers = nn.Sequential(
@@ -186,7 +187,7 @@ if __name__ == '__main__':
     engine_kwargs={"connect_args": {"timeout": 10}})
 
   
-    study = optuna.create_study(direction="minimize", study_name = 'parallel_no_st2', storage=storage, load_if_exists=True, pruner=pruner, sampler=sampler)
+    study = optuna.create_study(direction="minimize", study_name = 'parallel_no_st2_parammult', storage=storage, load_if_exists=True, pruner=pruner, sampler=sampler)
     #study.optimize(functools.partial(train, dls=dls),n_trials=500)
     best = study.best_trial
     dlss = [get_dls(train_df,100, trn_idx, val_idx) for trn_idx, val_idx in GroupKFold().split(train_df, groups = train_df.time_id)]
