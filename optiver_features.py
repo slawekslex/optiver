@@ -25,6 +25,8 @@ def log_return_price(df): return df.groupby('time_id')['price'].apply(log_return
 def realized_volatility(series):
     return np.sqrt(np.sum(series**2))
 
+def distinct()
+
 def to32bit(df):
     for c in df.columns:
         if df[c].dtype == np.float64: 
@@ -64,7 +66,7 @@ def ffill(data_df):
 
 class OptiverFeatureGenerator():
     def __init__(self, book_feature_dict, trade_feature_dict, time_windows, 
-                 time_id_features, time_id_agg, stock_id_features, stock_id_agg,
+                 time_id_features=[], time_id_agg=[], stock_id_features=[], stock_id_agg=[],
                  data_dir = Path('../input/optiver-realized-volatility-prediction'),
                  cache_dir = None):
         store_attr()
