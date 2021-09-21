@@ -68,6 +68,7 @@ class TimeEncoding(nn.Module):
         self.initial_layers = LinBnDrop(inp_size, bottleneck, act=nn.ReLU(True), p=p, bn=False)
         
         self.concat_layers = nn.Sequential(
+            nn.BatchNorm1d(bottleneck * STOCK_COUNT),
             nn.Linear(bottleneck * STOCK_COUNT, inp_size),
             nn.Tanh()
         )
@@ -103,9 +104,10 @@ class ParallelModel(nn.Module):
         lin_sizes = [inp_size+emb_size] + lin_sizes
         layers = []
         for n_in, n_out, p, time_p in zip(lin_sizes, lin_sizes[1:], ps, time_ps):
-            layers.append(BN(n_in ))
-            if p: layers.append(nn.Dropout(p))
             layers.append(nn.Linear(n_in, n_out))
+            layers.append(BN(n_out ))
+            if p: layers.append(nn.Dropout(p))
+            
             layers.append(nn.ReLU(True))
             
             layers.append(TimeEncoding(n_out, bottleneck, time_p, multiplier))
@@ -133,8 +135,8 @@ def rmspe(preds, targs):
         print(preds)
         raise Exception('fck loss is nan')
     return res
-    
-def train(trial, dls):
+
+def train(trial, dls, save_as=None):
     inp_size = FEATURE_COUNT
     emb_size = trial.suggest_int('emb_size', 3, 30)
     max_sizes = [2000, 1000, 500]
@@ -154,9 +156,19 @@ def train(trial, dls):
     # with learn.no_bar():
     #     with learn.no_logging():    
     learn.fit_flat_cos(50, lr)
-
+    if save_as:
+        learn.save(save_as)
     last5 = L(learn.recorder.values).itemgot(2)[-5:]
     return np.mean(last5)
+
+def train_cross_valid(trial, dlss, save_as=None):
+    res = 0
+    for idx, dls in enumerate(dlss):
+        v = train(trial, dls, save_as + str(idx) if save_as else None)
+        print(f'fold {idx}: {v}')
+        res +=v;
+    return res/5
+
 
 if __name__ == '__main__':
     #train_df = pd.read_feather('train_24cols.feather')
@@ -174,9 +186,10 @@ if __name__ == '__main__':
     engine_kwargs={"connect_args": {"timeout": 10}})
 
   
-    study = optuna.create_study(direction="minimize", study_name = 'parallel_no_st', storage=storage, load_if_exists=True, pruner=pruner, sampler=sampler)
-    study.optimize(functools.partial(train, dls=dls))
-    # best = study.best_trial
-    # train(best, dls)
+    study = optuna.create_study(direction="minimize", study_name = 'parallel_no_st2', storage=storage, load_if_exists=True, pruner=pruner, sampler=sampler)
+    #study.optimize(functools.partial(train, dls=dls),n_trials=500)
+    best = study.best_trial
+    dlss = [get_dls(train_df,100, trn_idx, val_idx) for trn_idx, val_idx in GroupKFold().split(train_df, groups = train_df.time_id)]
+    print('CROSS VALID:' ,train_cross_valid(best, dlss ))
 
     
