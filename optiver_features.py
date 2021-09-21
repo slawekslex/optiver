@@ -25,7 +25,6 @@ def log_return_price(df): return df.groupby('time_id')['price'].apply(log_return
 def realized_volatility(series):
     return np.sqrt(np.sum(series**2))
 
-def distinct()
 
 def to32bit(df):
     for c in df.columns:

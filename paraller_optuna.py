@@ -5,7 +5,7 @@ from optuna.integration import FastAIPruningCallback
 import sqlalchemy
 
 STOCK_COUNT = 112
-FEATURE_COUNT = 144
+FEATURE_COUNT = 126
 
 def fill_missing(train_df):
     all_times = train_df.time_id.unique()
@@ -20,28 +20,41 @@ def fill_missing(train_df):
 
     
 
+class Jitter(ItemTransform):
+    def __init__(self, jit_std):
+            super().__init__()
+            self.split_idx = 0
+            self.jit_std = jit_std
+            
+    def encodes(self, b):
+        #print('doing jitter ', self.jit_std)
+        jitter = torch.empty_like(b[1]).normal_(0, self.jit_std)
+        b[1] += jitter
+        return b
+
 class MaskTfm(ItemTransform):
-    do_tranform=0
+    
+    def __init__(self, mask_perc):
+        super().__init__()
+        self.split_idx = 0
+        self.mask_perc = mask_perc
+    
     def mask(self, x, indices):
         x[torch.tensor(indices, device=x.device)] = 0
         return x
     
-    def __call__(self, b, split_idx=None, **kwargs):
-        self.do_transform = (split_idx == 0)
-        return super().__call__(b, split_idx=split_idx, **kwargs)
-    
-
     def encodes(self, x):
-        if not self.do_transform: return x
+        #print('doing mask', self.mask_perc)
         n = len(x[0])
-        indices = np.random.choice(np.array(range(n)), n//10, replace=False)
+        to_mask = (n * self.mask_perc) // 100
+        indices = np.random.choice(np.array(range(n)), to_mask, replace=False)
         x = [self.mask(y, indices) for y in x]
         
         return x
 
 class MyDataLoader(TabDataLoader):
-    def __init__(self, dataset, bs=16, shuffle=False, after_batch=None, num_workers=0, **kwargs):
-        if after_batch is None: after_batch = L(TransformBlock().batch_tfms)+ReadTabBatch(dataset) + [MaskTfm()]
+    def __init__(self, dataset, jit_std, mask_perc, bs=16, shuffle=False, after_batch=None, num_workers=0,  **kwargs):
+        if after_batch is None: after_batch = L(TransformBlock().batch_tfms)+ReadTabBatch(dataset) + [Jitter(jit_std), MaskTfm(mask_perc)]
         super().__init__(dataset, bs=bs, shuffle=shuffle, after_batch=after_batch, num_workers=num_workers, **kwargs)
 
     def shuffle_fn(self, idxs):
@@ -49,13 +62,13 @@ class MyDataLoader(TabDataLoader):
         np.random.shuffle(idxs)
         return idxs.reshape(-1).tolist()
 
-def get_dls(train_df, bs, trn_idx, val_idx):
+def get_dls(train_df, bs, trn_idx, val_idx, jit_std=.13, mask_perc=8):
     cont_nn,cat_nn = cont_cat_split(train_df, max_card=9000, dep_var='target')
     cat_nn=[x for x in cat_nn if not x in ['row_id', 'time_id']]
     
     procs_nn = [Categorify, Normalize]
     to_nn = TabularPandas(train_df, procs_nn, cat_nn, cont_nn, splits=[list(trn_idx), list(val_idx)], y_names='target')
-    dls = to_nn.dataloaders(bs=112*100, shuffle=True, dl_type = MyDataLoader)
+    dls = to_nn.dataloaders(bs=112*100, shuffle=True, dl_type = MyDataLoader, jit_std=jit_std, mask_perc=mask_perc)
     dls.train_ds.split_idx=0
     dls.valid_ds.split_idx=1
     return dls
@@ -64,8 +77,7 @@ def get_dls(train_df, bs, trn_idx, val_idx):
 class TimeEncoding(nn.Module):
     def __init__(self, inp_size, bottleneck, p, multiplier):
         super().__init__()
-        self.multiplier  = nn.Parameter(torch.tensor(multiplier)) 
-        # self.multiplier = multiplier
+        self.multiplier  = multiplier#nn.Parameter(torch.tensor(multiplier)) 
         self.initial_layers = LinBnDrop(inp_size, bottleneck, act=nn.ReLU(True), p=p, bn=False)
         
         self.concat_layers = nn.Sequential(
@@ -96,15 +108,16 @@ class BN(nn.Module):
         return x.view(*sh)
     
 class ParallelModel(nn.Module):
-    def __init__(self, inp_size, emb_size, lin_sizes, ps, bottleneck, time_ps, multiplier ):
+    def __init__(self, inp_size, emb_size, lin_sizes, ps, bottleneck, time_ps, multipliers, embed_p ):
         super().__init__()
         
         self.stock_emb = nn.Parameter(torch.empty(STOCK_COUNT, emb_size))
+        self.embed_drop = nn.Dropout(embed_p)
         nn.init.normal_(self.stock_emb)
         
         lin_sizes = [inp_size+emb_size] + lin_sizes
         layers = []
-        for n_in, n_out, p, time_p in zip(lin_sizes, lin_sizes[1:], ps, time_ps):
+        for n_in, n_out, p, time_p, multiplier in zip(lin_sizes, lin_sizes[1:], ps, time_ps, multipliers):
             layers.append(nn.Linear(n_in, n_out))
             layers.append(BN(n_out ))
             if p: layers.append(nn.Dropout(p))
@@ -120,6 +133,7 @@ class ParallelModel(nn.Module):
     def forward(self, x_cat, x_cont):
         times = x_cat.shape[0] // STOCK_COUNT
         s_e = self.stock_emb.repeat(times, 1)
+        s_e = self.embed_drop(s_e)
         x = torch.cat([x_cont, s_e], dim=1)
         for l in self.layers.children():
             #print(x.shape, x.mean(), x.std())
@@ -137,22 +151,29 @@ def rmspe(preds, targs):
         raise Exception('fck loss is nan')
     return res
 
-def train(trial, dls, save_as=None):
+def train(trial, train_df, save_as=None):
     inp_size = FEATURE_COUNT
+    jit_std=trial.suggest_float('jit_std', 0, .5)
+    mask_perc=trial.suggest_int('mask_perc', 0, 20)
+    
     emb_size = trial.suggest_int('emb_size', 3, 30)
+    emb_p = trial.suggest_float(f'emb_p', 0, .5)
     max_sizes = [2000, 1000, 500]
-    lin_sizes = [trial.suggest_int(f'lin_size{i}', 10, ms) for i, ms in enumerate(max_sizes)]
+    lin_sizes = [500,500,500]#[trial.suggest_int(f'lin_size{i}', 10, ms) for i, ms in enumerate(max_sizes)]
     ps = [0]+[trial.suggest_float(f'p{i}', 0, .8) for i in range(1,3)]
     
     bottleneck = trial.suggest_int('bottleneck', 5, 100)
     time_ps = [trial.suggest_float(f'time_p{i}', 0, .5) for i in range(3)]
-    multiplier = trial.suggest_float('multiplier', .01, .5)
+    multipliers = [trial.suggest_float(f'multiplier{i}', .01, .5) for i in range(3)]
     lr = float(trial.suggest_float('lr', 1e-3, 1e-2))
     
-    model = ParallelModel(inp_size, emb_size, lin_sizes, ps, bottleneck, time_ps, multiplier)
+    trn_idx0, val_idx0 = first(GroupKFold().split(train_df, groups = train_df.time_id))
+    dls0 = get_dls(train_df, 100, trn_idx0, val_idx0, jit_std=jit_std, mask_perc = mask_perc)
+    
+    model = ParallelModel(inp_size, emb_size, lin_sizes, ps, bottleneck, time_ps, multipliers, emb_p)
     #bx1, bx2, by = dls.one_batch()
     
-    learn = Learner(dls,model = model, loss_func=rmspe, metrics=AccumMetric(rmspe), opt_func=ranger,
+    learn = Learner(dls0,model = model, loss_func=rmspe, metrics=AccumMetric(rmspe), opt_func=ranger,
         cbs = FastAIPruningCallback(trial, 'rmspe')).to_fp16()
     # with learn.no_bar():
     #     with learn.no_logging():    
@@ -174,10 +195,9 @@ def train_cross_valid(trial, dlss, save_as=None):
 if __name__ == '__main__':
     #train_df = pd.read_feather('train_24cols.feather')
     #train_df = pd.read_csv('train_with_features.csv')
-    train_df = pd.read_csv('train_with_features_NO_ST.csv')
+    train_df = pd.read_feather('train_126ftrs.feater')
     train_df = fill_missing(train_df)
-    trn_idx0, val_idx0 = first(GroupKFold().split(train_df, groups = train_df.time_id))
-    dls = get_dls(train_df, 100, trn_idx0, val_idx0)
+   
 
     pruner = optuna.pruners.NopPruner()#optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5)
     sampler = None#optuna.samplers.CmaEsSampler(warn_independent_sampling=False, consider_pruned_trials=False, n_startup_trials=20, restart_strategy='ipop')
@@ -187,10 +207,10 @@ if __name__ == '__main__':
     engine_kwargs={"connect_args": {"timeout": 10}})
 
   
-    study = optuna.create_study(direction="minimize", study_name = 'parallel_no_st2_parammult', storage=storage, load_if_exists=True, pruner=pruner, sampler=sampler)
-    #study.optimize(functools.partial(train, dls=dls),n_trials=500)
-    best = study.best_trial
-    dlss = [get_dls(train_df,100, trn_idx, val_idx) for trn_idx, val_idx in GroupKFold().split(train_df, groups = train_df.time_id)]
-    print('CROSS VALID:' ,train_cross_valid(best, dlss ))
+    study = optuna.create_study(direction="minimize", study_name = 'train_126ftrs', storage=storage, load_if_exists=True, pruner=pruner, sampler=sampler)
+    study.optimize(functools.partial(train, train_df=train_df),n_trials=500)
+    # best = study.best_trial
+    # dlss = [get_dls(train_df,100, trn_idx, val_idx) for trn_idx, val_idx in GroupKFold().split(train_df, groups = train_df.time_id)]
+    # print('CROSS VALID:' ,train_cross_valid(best, dlss ))
 
     
