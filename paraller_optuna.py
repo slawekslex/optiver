@@ -5,9 +5,10 @@ from optuna.integration import FastAIPruningCallback
 import sqlalchemy
 
 STOCK_COUNT = 112
-FEATURE_COUNT = 126
+
 
 def fill_missing(train_df):
+    
     all_times = train_df.time_id.unique()
     all_stocks = train_df.stock_id.unique()
     filled_df = train_df.copy()
@@ -17,6 +18,33 @@ def fill_missing(train_df):
     filled_df = filled_df.fillna(0)
     return filled_df
 
+def subtract_windows(df, time_windows):
+    for s,e in time_windows[1:]:
+        for c in df.columns:
+            wind = f'{s}_{e}'
+            if c.endswith(wind): 
+                pref = c[:-len(wind)]
+                main_col = pref+'0_600'
+                df[c] = df[main_col]-df[c]
+    return df
+
+def append_trade_count(train_df, time_windows):
+    for s,e in time_windows:
+        train_df[f'number_trades_{s}_{e}'] = 'more'
+        for val in range(3): train_df.loc[train_df[f'seconds_in_bucket_size_{s}_{e}']==val, f'number_trades_{s}_{e}'] = val
+    return train_df
+
+def tauify(train_df):
+    for c in train_df.columns:
+        if 'sum' in c: train_df[c] = np.sqrt(1/(train_df[c]+1))
+    return train_df
+
+def post_process(train_df, time_windows, do_subtract, do_append, do_tau):
+    train_df = fill_missing(train_df)
+    if do_subtract: train_df = subtract_windows(train_df, time_windows)
+    if do_append: train_df = append_trade_count(train_df, time_windows)
+    if do_tau: train_df = tauify(train_df)
+    return train_df
 
     
 
@@ -68,7 +96,7 @@ def get_dls(train_df, bs, trn_idx, val_idx, jit_std=.13, mask_perc=8):
     
     procs_nn = [Categorify, Normalize]
     to_nn = TabularPandas(train_df, procs_nn, cat_nn, cont_nn, splits=[list(trn_idx), list(val_idx)], y_names='target')
-    dls = to_nn.dataloaders(bs=112*100, shuffle=True, dl_type = MyDataLoader, jit_std=jit_std, mask_perc=mask_perc)
+    dls = to_nn.dataloaders(bs=STOCK_COUNT * bs, shuffle=True, dl_type = MyDataLoader, jit_std=jit_std, mask_perc=mask_perc)
     dls.train_ds.split_idx=0
     dls.valid_ds.split_idx=1
     return dls
@@ -106,40 +134,49 @@ class BN(nn.Module):
         x = x.view(-1, STOCK_COUNT * self.num_features)
         x = self.bn(x)
         return x.view(*sh)
+
+class ParallelBlock(nn.Module):
+    def __init__(self, block_size, p, time_p, bottleneck, multiplier, do_skip):
+        super().__init__()
+        self.do_skip = do_skip
+        self.layers = nn.Sequential(
+            nn.Linear(block_size, block_size),
+            BN(block_size ),
+            nn.Dropout(p),
+            nn.ReLU(True),
+            TimeEncoding(block_size, bottleneck, time_p, multiplier)
+        )
+    def forward(self, x):
+        y = self.layers(x)
+        if self.do_skip: return (y + x) /2
+        else: return y
     
 class ParallelModel(nn.Module):
-    def __init__(self, inp_size, emb_size, lin_sizes, ps, bottleneck, time_ps, multipliers, embed_p ):
+    def __init__(self, inp_size, emb_szs, block_size, ps, bottleneck, time_ps, multipliers, embed_p, do_skip ):
         super().__init__()
         
-        self.stock_emb = nn.Parameter(torch.empty(STOCK_COUNT, emb_size))
+        self.embeds = nn.ModuleList([Embedding(ni, nf) for ni,nf in emb_szs])
         self.embed_drop = nn.Dropout(embed_p)
-        nn.init.normal_(self.stock_emb)
+        n_emb = sum(e.embedding_dim for e in self.embeds)
         
-        lin_sizes = [inp_size+emb_size] + lin_sizes
-        layers = []
-        for n_in, n_out, p, time_p, multiplier in zip(lin_sizes, lin_sizes[1:], ps, time_ps, multipliers):
-            layers.append(nn.Linear(n_in, n_out))
-            layers.append(BN(n_out ))
-            if p: layers.append(nn.Dropout(p))
+        layers = [nn.Linear(inp_size+n_emb, block_size),
+                 BN(block_size),
+                 nn.ReLU(True)]
+        for p, time_p, multiplier in zip( ps, time_ps, multipliers):            
+            layers.append(ParallelBlock(block_size, p, time_p, bottleneck, multiplier, do_skip))
             
-            layers.append(nn.ReLU(True))
-            
-            layers.append(TimeEncoding(n_out, bottleneck, time_p, multiplier))
-        layers.append(LinBnDrop(lin_sizes[-1], 1, bn=False))
+        layers.append(nn.Linear(block_size, 1))
         layers.append(SigmoidRange(0, .1))
         self.layers = nn.Sequential(*layers)
     
     
     def forward(self, x_cat, x_cont):
-        times = x_cat.shape[0] // STOCK_COUNT
-        s_e = self.stock_emb.repeat(times, 1)
-        s_e = self.embed_drop(s_e)
-        x = torch.cat([x_cont, s_e], dim=1)
-        for l in self.layers.children():
-            #print(x.shape, x.mean(), x.std())
-            x = l(x)
-        return x#self.layers(x)
-
+        x = [e(x_cat[:,i]) for i,e in enumerate(self.embeds)]
+        x = torch.cat(x, 1)
+        x = self.embed_drop(x)
+        x = torch.cat([x_cont, x], dim=1)
+        return self.layers(x)
+    
 def rmspe(preds, targs):
     mask = targs != 0
     targs, preds = torch.masked_select(targs, mask), torch.masked_select(preds, mask)
@@ -151,30 +188,38 @@ def rmspe(preds, targs):
         raise Exception('fck loss is nan')
     return res
 
-def train(trial, train_df, save_as=None):
-    inp_size = FEATURE_COUNT
-    jit_std=trial.suggest_float('jit_std', 0, .5)
-    mask_perc=trial.suggest_int('mask_perc', 0, 20)
+def train(trial, train_df, trn_idx, val_idx, save_as=None):
+    do_subtract = trial.suggest_categorical('do_subtract', [True, False])
+    do_append = trial.suggest_categorical('do_append', [True, False])
+    do_tau = trial.suggest_categorical('do_tau', [True, False])
+    train_df = post_process(train_df, time_windows, do_subtract, do_append, do_tau)
     
+    jit_std=trial.suggest_float('jit_std', 0, .1)
+    mask_perc=trial.suggest_int('mask_perc', 5, 20)
+    
+    
+    if trn_idx is None:
+        trn_idx, val_idx = first(GroupKFold().split(train_df, groups = train_df.time_id))
+    dls = get_dls(train_df, 100, trn_idx, val_idx, jit_std=jit_std, mask_perc = mask_perc)
+    inp_size = len(dls.cont_names)
+    
+    do_skip = trial.suggest_categorical('do_skip', [True, False])
     emb_size = trial.suggest_int('emb_size', 3, 30)
+    emb_sizes = [(len(c_vals), emb_size if c_name == 'stock_id' else 3) for c_name, c_vals in dls.train.classes.items()]
     emb_p = trial.suggest_float(f'emb_p', 0, .5)
-    max_sizes = [2000, 1000, 500]
-    lin_sizes = [500,500,500]#[trial.suggest_int(f'lin_size{i}', 10, ms) for i, ms in enumerate(max_sizes)]
-    ps = [0]+[trial.suggest_float(f'p{i}', 0, .8) for i in range(1,3)]
-    
+    block_size = trial.suggest_int(f'block_size', 50, 1000) 
+    ps = [trial.suggest_float(f'p{i}', 0, .8) for i in range(3)]
     bottleneck = trial.suggest_int('bottleneck', 5, 100)
     time_ps = [trial.suggest_float(f'time_p{i}', 0, .5) for i in range(3)]
     multipliers = [trial.suggest_float(f'multiplier{i}', .01, .5) for i in range(3)]
+    
     lr = float(trial.suggest_float('lr', 1e-3, 1e-2))
+    wd = float(trial.suggest_float('wd', 0, .2))
     
-    trn_idx0, val_idx0 = first(GroupKFold().split(train_df, groups = train_df.time_id))
-    dls0 = get_dls(train_df, 100, trn_idx0, val_idx0, jit_std=jit_std, mask_perc = mask_perc)
     
-    model = ParallelModel(inp_size, emb_size, lin_sizes, ps, bottleneck, time_ps, multipliers, emb_p)
-    #bx1, bx2, by = dls.one_batch()
-    
-    learn = Learner(dls0,model = model, loss_func=rmspe, metrics=AccumMetric(rmspe), opt_func=ranger,
-        cbs = FastAIPruningCallback(trial, 'rmspe')).to_fp16()
+    model = ParallelModel(inp_size, emb_sizes, block_size, ps, bottleneck, time_ps, multipliers, emb_p, do_skip)
+    learn = Learner(dls,model = model, loss_func=rmspe, metrics=AccumMetric(rmspe), opt_func=ranger,
+        cbs = FastAIPruningCallback(trial, 'rmspe'), wd=wd).to_fp16()
     # with learn.no_bar():
     #     with learn.no_logging():    
     learn.fit_flat_cos(50, lr)
@@ -183,10 +228,11 @@ def train(trial, train_df, save_as=None):
     last5 = L(learn.recorder.values).itemgot(2)[-5:]
     return np.mean(last5)
 
-def train_cross_valid(trial, dlss, save_as=None):
+def train_cross_valid(trial, train_df, save_as=None):
     res = 0
-    for idx, dls in enumerate(dlss):
-        v = train(trial, dls, save_as + str(idx) if save_as else None)
+    splits = GroupKFold().split(train_df, groups = train_df.time_id)
+    for idx, (trn_idx, val_idx) in enumerate(splits):
+        v = train(trial, train_df, trn_idx, val_idx, save_as + str(idx) if save_as else None)
         print(f'fold {idx}: {v}')
         res +=v;
     return res/5
@@ -195,11 +241,12 @@ def train_cross_valid(trial, dlss, save_as=None):
 if __name__ == '__main__':
     #train_df = pd.read_feather('train_24cols.feather')
     #train_df = pd.read_csv('train_with_features.csv')
-    train_df = pd.read_feather('train_126ftrs.feater')
-    train_df = fill_missing(train_df)
-   
+    time_windows = [(0,600), (0,100), (100,200), (200,300), (300,400), (400, 500), (500,600)]
+    train_df = pd.read_feather('train_141cols.feather')
+    
+    
 
-    pruner = optuna.pruners.NopPruner()#optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5)
+    pruner = optuna.pruners.NopPruner()
     sampler = None#optuna.samplers.CmaEsSampler(warn_independent_sampling=False, consider_pruned_trials=False, n_startup_trials=20, restart_strategy='ipop')
 
     storage = optuna.storages.RDBStorage(
@@ -207,8 +254,8 @@ if __name__ == '__main__':
     engine_kwargs={"connect_args": {"timeout": 10}})
 
   
-    study = optuna.create_study(direction="minimize", study_name = 'train_126ftrs', storage=storage, load_if_exists=True, pruner=pruner, sampler=sampler)
-    study.optimize(functools.partial(train, train_df=train_df),n_trials=500)
+    study = optuna.create_study(direction="minimize", study_name = 'parallel_v2', storage=storage, load_if_exists=True, pruner=pruner, sampler=sampler)
+    study.optimize(functools.partial(train, train_df=train_df, trn_idx=None, val_idx=None),n_trials=500)
     # best = study.best_trial
     # dlss = [get_dls(train_df,100, trn_idx, val_idx) for trn_idx, val_idx in GroupKFold().split(train_df, groups = train_df.time_id)]
     # print('CROSS VALID:' ,train_cross_valid(best, dlss ))
