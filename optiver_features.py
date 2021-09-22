@@ -3,7 +3,7 @@ import numpy as np
 from pathlib import Path
 from multiprocessing import Pool
 from fastai.basics import *
-
+import pdb
 
 def wap1(df):
     return (df['bid_price1'] * df['ask_size1'] + df['ask_price1'] * df['bid_size1']) / (df['bid_size1'] + df['ask_size1'])
@@ -25,6 +25,33 @@ def log_return_price(df): return df.groupby('time_id')['price'].apply(log_return
 def realized_volatility(series):
     return np.sqrt(np.sum(series**2))
 
+def tendency(price, vol):    
+        df_diff = np.diff(price)
+        val = (df_diff/price[1:])*100
+        power = np.sum(val*vol[1:])
+        return(power)
+
+def extra_trade_ftrs(df):
+    lis = []
+    for n_time_id in df['time_id'].unique():
+        df_id = df[df['time_id'] == n_time_id]        
+        tendencyV = tendency(df_id['price'].values, df_id['size'].values)      
+        f_max = np.sum(df_id['price'].values > np.mean(df_id['price'].values))
+        f_min = np.sum(df_id['price'].values < np.mean(df_id['price'].values))
+        df_max =  np.sum(np.diff(df_id['price'].values) > 0)
+        df_min =  np.sum(np.diff(df_id['price'].values) < 0)
+        abs_diff = np.median(np.abs( df_id['price'].values - np.mean(df_id['price'].values)))        
+        energy = np.mean(df_id['price'].values**2)
+        iqr_p = np.percentile(df_id['price'].values,75) - np.percentile(df_id['price'].values,25)
+        abs_diff_v = np.median(np.abs( df_id['size'].values - np.mean(df_id['size'].values)))        
+        energy_v = np.sum(df_id['size'].values**2)
+        iqr_p_v = np.percentile(df_id['size'].values,75) - np.percentile(df_id['size'].values,25)
+
+        lis.append({'time_id':n_time_id,'tendency':tendencyV,'f_max':f_max,'f_min':f_min,'df_max':df_max,'df_min':df_min,
+                    'abs_diff':abs_diff,'energy':energy,'iqr_p':iqr_p,'abs_diff_v':abs_diff_v,'energy_v':energy_v,'iqr_p_v':iqr_p_v})
+
+
+    return pd.DataFrame(lis).set_index('time_id')
 
 def to32bit(df):
     for c in df.columns:
@@ -78,7 +105,9 @@ class OptiverFeatureGenerator():
         book_df = ffill(book_df)
         book_feat = process_data(book_df, self.book_feature_dict, self.time_windows)
         trade_feat = process_data(trade_df, self.trade_feature_dict, self.time_windows)
-        ret = pd.concat([to32bit(trade_feat), to32bit(book_feat)], axis=1)
+        trade_extra = extra_trade_ftrs(trade_df)
+        ret = pd.concat([to32bit(trade_feat), to32bit(book_feat), to32bit(trade_extra)], axis=1)
+        
         ret = ret.reset_index()
         ret['row_id'] = ret['time_id'].apply(lambda x:f'{stock_id}-{x}')
         ret = ret.drop('time_id', axis=1)
@@ -88,6 +117,7 @@ class OptiverFeatureGenerator():
         pool = Pool()
         df = pool.starmap(self.process_one_stock, zip(list_stock_ids, [typ]*len(list_stock_ids)))
         df = pd.concat(df, ignore_index = True)
+
         return df
 
     def add_time_stock(self, df):
