@@ -189,9 +189,9 @@ def rmspe(preds, targs):
     return res
 
 def train(trial, train_df, trn_idx, val_idx, save_as=None):
-    do_subtract = trial.suggest_categorical('do_subtract', [True, False])
-    do_append = trial.suggest_categorical('do_append', [True, False])
-    do_tau = trial.suggest_categorical('do_tau', [True, False])
+    do_subtract = False#trial.suggest_categorical('do_subtract', [True, False])
+    do_append = False#trial.suggest_categorical('do_append', [True, False])
+    do_tau = True#trial.suggest_categorical('do_tau', [True, False])
     train_df = post_process(train_df, time_windows, do_subtract, do_append, do_tau)
     
     jit_std=trial.suggest_float('jit_std', 0, .1)
@@ -203,15 +203,15 @@ def train(trial, train_df, trn_idx, val_idx, save_as=None):
     dls = get_dls(train_df, 100, trn_idx, val_idx, jit_std=jit_std, mask_perc = mask_perc)
     inp_size = len(dls.cont_names)
     
-    do_skip = trial.suggest_categorical('do_skip', [True, False])
+    do_skip =True# trial.suggest_categorical('do_skip', [True, False])
     emb_size = trial.suggest_int('emb_size', 3, 30)
     emb_sizes = [(len(c_vals), emb_size if c_name == 'stock_id' else 3) for c_name, c_vals in dls.train.classes.items()]
     emb_p = trial.suggest_float(f'emb_p', 0, .5)
     block_size = trial.suggest_int(f'block_size', 50, 1000) 
-    ps = [trial.suggest_float(f'p{i}', 0, .8) for i in range(3)]
+    ps = [trial.suggest_float(f'p{i}', 0, .8) for i in range(4)]
     bottleneck = trial.suggest_int('bottleneck', 5, 100)
-    time_ps = [trial.suggest_float(f'time_p{i}', 0, .5) for i in range(3)]
-    multipliers = [trial.suggest_float(f'multiplier{i}', .01, .5) for i in range(3)]
+    time_ps = [trial.suggest_float(f'time_p{i}', 0, .5) for i in range(4)]
+    multipliers = [trial.suggest_float(f'multiplier{i}', .01, .5) for i in range(4)]
     
     lr = float(trial.suggest_float('lr', 1e-3, 1e-2))
     wd = float(trial.suggest_float('wd', 0, .2))
@@ -254,7 +254,7 @@ if __name__ == '__main__':
     engine_kwargs={"connect_args": {"timeout": 10}})
 
   
-    study = optuna.create_study(direction="minimize", study_name = 'parallel_v2', storage=storage, load_if_exists=True, pruner=pruner, sampler=sampler)
+    study = optuna.create_study(direction="minimize", study_name = 'four_blocks', storage=storage, load_if_exists=True, pruner=pruner, sampler=sampler)
     study.optimize(functools.partial(train, train_df=train_df, trn_idx=None, val_idx=None),n_trials=500)
     # best = study.best_trial
     # dlss = [get_dls(train_df,100, trn_idx, val_idx) for trn_idx, val_idx in GroupKFold().split(train_df, groups = train_df.time_id)]
